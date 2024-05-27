@@ -6,6 +6,9 @@
 
 void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer);
 
+// OTA handler functions
+void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res);
+void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res);
 // Declare some handler functions for the various URLs on the server
 void handleAPIv1FromRadio(HTTPRequest *req, HTTPResponse *res);
 void handleAPIv1ToRadio(HTTPRequest *req, HTTPResponse *res);
@@ -24,10 +27,6 @@ void handleFs(HTTPRequest *req, HTTPResponse *res);
 void handleAdmin(HTTPRequest *req, HTTPResponse *res);
 void handleAdminSettings(HTTPRequest *req, HTTPResponse *res);
 void handleAdminSettingsApply(HTTPRequest *req, HTTPResponse *res);
-
-// OTA handler functions
-void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res);
-void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res);
 
 // Main setup and loop functions
 namespace ContentHandler

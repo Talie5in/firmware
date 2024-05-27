@@ -937,7 +937,7 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
 void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
 {
     res->setHeader("Content-Type", "text/html");
-    res->println("<form method='POST' action='/update' enctype='multipart/form-data'>"
+    res->println("<form method='POST' action='/admin/update' enctype='multipart/form-data'>"
                  "<input type='file' name='firmware' accept='.bin'>"
                  "<input type='submit' value='Update Firmware'>"
                  "</form>");
@@ -946,6 +946,10 @@ void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
 // Register handlers
 void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
 {
+    // OTA update nodes
+    ResourceNode *nodeOTAUploadForm = new ResourceNode("/admin/ota", "GET", &handleOTAUploadForm);
+    ResourceNode *nodeOTAUpload = new ResourceNode("/admin/update", "POST", &ota_handleFirmwareUpload);
+    // Original nodes
     ResourceNode *nodeAPIv1ToRadioOptions = new ResourceNode("/api/v1/toradio", "OPTIONS", &handleAPIv1ToRadio);
     ResourceNode *nodeAPIv1ToRadio = new ResourceNode("/api/v1/toradio", "PUT", &handleAPIv1ToRadio);
     ResourceNode *nodeAPIv1FromRadio = new ResourceNode("/api/v1/fromradio", "GET", &handleAPIv1FromRadio);
@@ -958,10 +962,6 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     ResourceNode *nodeJsonFsBrowseStatic = new ResourceNode("/json/fs/browse/static", "GET", &handleFsBrowseStatic);
     ResourceNode *nodeJsonDelete = new ResourceNode("/json/fs/delete/static", "DELETE", &handleFsDeleteStatic);
     ResourceNode *nodeRoot = new ResourceNode("/*", "GET", &handleStatic);
-
-    // OTA update nodes
-    ResourceNode *nodeOTAUploadForm = new ResourceNode("/ota", "GET", &handleOTAUploadForm);
-    ResourceNode *nodeOTAUpload = new ResourceNode("/update", "POST", &ota_handleFirmwareUpload);
 
     // Secure nodes
     secureServer->registerNode(nodeAPIv1ToRadioOptions);
@@ -990,10 +990,10 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     insecureServer->registerNode(nodeJsonFsBrowseStatic);
     insecureServer->registerNode(nodeJsonDelete);
     insecureServer->registerNode(nodeJsonReport);
-    insecureServer->registerNode(nodeAdmin);
-    insecureServer->registerNode(nodeRoot);
     insecureServer->registerNode(nodeOTAUploadForm);
     insecureServer->registerNode(nodeOTAUpload);
+    insecureServer->registerNode(nodeAdmin);
+    insecureServer->registerNode(nodeRoot);
 }
 
 #endif
