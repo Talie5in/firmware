@@ -880,21 +880,6 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
     if (req->getMethod() == "POST") {
         Serial.println("Received OTA update request");
 
-        // Initialize SPIFFS if not already done
-        if (!SPIFFS.begin(true)) {
-            Serial.println("Failed to mount SPIFFS");
-            res->setStatusCode(500);
-            res->setStatusText("Failed to mount SPIFFS");
-            return;
-        }
-
-        // Check available space
-        size_t totalBytes = SPIFFS.totalBytes();
-        size_t usedBytes = SPIFFS.usedBytes();
-        size_t freeBytes = totalBytes - usedBytes;
-
-        Serial.printf("SPIFFS Total: %d, Used: %d, Free: %d\n", totalBytes, usedBytes, freeBytes);
-
         // Get content length
         auto contentLength = req->getHeader("Content-Length");
         if (contentLength.empty()) {
@@ -907,76 +892,44 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
         int len = std::stoi(contentLength);
         Serial.printf("Content-Length: %d\n", len);
 
-        if (len > freeBytes) {
-            Serial.println("Not enough space in SPIFFS");
+        // Check available space
+        size_t freeSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        Serial.printf("Free sketch space: %d\n", freeSketchSpace);
+
+        if (len > freeSketchSpace) {
+            Serial.println("Firmware size is too large");
             res->setStatusCode(500);
-            res->setStatusText("Not enough space in SPIFFS");
+            res->setStatusText("Update failed");
+            res->println("Firmware size is too large");
             return;
         }
 
-        // Open the file for writing in SPIFFS
-        File updateFile = SPIFFS.open("/firmware.bin", FILE_WRITE);
-        if (!updateFile) {
-            Serial.println("Failed to open file for writing");
-            res->setStatusCode(500);
-            res->setStatusText("Failed to open file for writing");
-            return;
-        }
-
-        // Write the incoming data to the file
-        int written = 0;
-        uint8_t buffer[128];
-        while (written < len) {
-            int bytesRead = req->readBytes(buffer, sizeof(buffer));
-            if (bytesRead > 0) {
-                updateFile.write(buffer, bytesRead);
-                written += bytesRead;
-            } else {
-                break;
-            }
-        }
-
-        updateFile.close();
-
-        if (written == len) {
-            Serial.println("Firmware upload complete");
-        } else {
-            Serial.println("Firmware upload failed");
-            res->setStatusCode(500);
-            res->setStatusText("Upload failed");
-            res->println("Firmware upload failed");
-            return;
-        }
-
-        // Start firmware update from SPIFFS
-        Serial.println("Starting firmware update from SPIFFS");
-
-        updateFile = SPIFFS.open("/firmware.bin", FILE_READ);
-        if (!updateFile) {
-            Serial.println("Failed to open firmware file");
-            res->setStatusCode(500);
-            res->setStatusText("Failed to open firmware file");
-            return;
-        }
-
-        size_t updateSize = updateFile.size();
-        Serial.printf("Firmware size: %d\n", updateSize);
-
-        if (!Update.begin(updateSize, U_FLASH)) {
+        if (!Update.begin(len, U_FLASH)) {
             Serial.println("Update.begin() failed");
             Update.printError(Serial);
             res->setStatusCode(500);
             res->setStatusText("Update failed to start");
-            updateFile.close();
             return;
         }
 
-        size_t totalWritten = Update.writeStream(updateFile);
-        if (totalWritten == updateSize) {
-            Serial.println("Written : " + String(totalWritten) + " successfully");
-        } else {
-            Serial.println("Written only : " + String(totalWritten) + "/" + String(updateSize) + ". Retry?");
-            Update.printError(Serial);
+        int written = 0;
+        while (written < len) {
+            uint8_t buffer[128];
+            int bytesRead = req->readBytes(buffer, sizeof(buffer));
+            if (bytesRead > 0) {
+                if (Update.write(buffer, bytesRead) != bytesRead) {
+                    Serial.println("Update.write() failed");
+                    Update.printError(Serial);
+                    res->setStatusCode(500);
+                    res->setStatusText("Update failed");
+                    res->println("Update failed during write");
+                    Update.abort();
+                    return;
+                }
+                written += bytesRead;
+            } else {
+                break;
+            }
         }
 
         if (Update.end()) {
@@ -994,12 +947,11 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
                 Update.printError(Serial);
             }
         } else {
-            Serial.println("Update failed. Error #: " + String(Update.getError()));
+            Serial.println("Update.end() failed");
             res->setStatusCode(500);
             res->setStatusText("Update failed");
             Update.printError(Serial);
         }
-        updateFile.close();
     } else {
         res->setStatusCode(405);
         res->setStatusText("Method Not Allowed");
