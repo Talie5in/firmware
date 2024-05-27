@@ -1,4 +1,9 @@
 #pragma once
+
+#include <HTTPRequest.hpp>
+#include <HTTPResponse.hpp>
+#include <HTTPServer.hpp>
+
 void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer);
 
 // Declare some handler functions for the various URLs on the server
@@ -20,10 +25,20 @@ void handleAdmin(HTTPRequest *req, HTTPResponse *res);
 void handleAdminSettings(HTTPRequest *req, HTTPResponse *res);
 void handleAdminSettingsApply(HTTPRequest *req, HTTPResponse *res);
 
+// OTA handler functions
+void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res);
+void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res);
+
+// Main setup and loop functions
+namespace ContentHandler
+{
+void setup();
+void loop();
+} // namespace ContentHandler
+
 // Interface to the PhoneAPI to access the protobufs with messages
 class HttpAPI : public PhoneAPI
 {
-
   public:
     // Nothing here yet
 

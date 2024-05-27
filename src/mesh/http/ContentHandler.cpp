@@ -12,29 +12,21 @@
 #include "mqtt/JSON.h"
 #include "power.h"
 #include "sleep.h"
+#include <FS.h>
 #include <FSCommon.h>
 #include <HTTPBodyParser.hpp>
 #include <HTTPMultipartBodyParser.hpp>
 #include <HTTPURLEncodedBodyParser.hpp>
+#include <SPIFFS.h>
+#include <Update.h>
 
 #ifdef ARCH_ESP32
 #include "esp_task_wdt.h"
 #endif
 
-/*
-  Including the esp32_https_server library will trigger a compile time error. I've
-  tracked it down to a reoccurrance of this bug:
-    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=57824
-  The work around is described here:
-    https://forums.xilinx.com/t5/Embedded-Development-Tools/Error-with-Standard-Libaries-in-Zynq/td-p/450032
-
-  Long story short is we need "#undef str" before including the esp32_https_server.
-    - Jm Casler (jm@casler.org) Oct 2020
-*/
 #undef str
 
 // Includes for the https server
-//   https://github.com/fhessel/esp32_https_server
 #include <HTTPRequest.hpp>
 #include <HTTPResponse.hpp>
 #include <HTTPSServer.hpp>
@@ -52,8 +44,6 @@ HTTPClient httpClient;
 
 #define DEST_FS_USES_LITTLEFS
 
-// We need to specify some content-type mapping, so the resources get delivered with the
-// right content type and are displayed correctly in the browser
 char contentTypes[][2][32] = {{".txt", "text/plain"},     {".html", "text/html"},
                               {".js", "text/javascript"}, {".png", "image/png"},
                               {".jpg", "image/jpg"},      {".gz", "application/gzip"},
@@ -61,88 +51,156 @@ char contentTypes[][2][32] = {{".txt", "text/plain"},     {".html", "text/html"}
                               {".css", "text/css"},       {".ico", "image/vnd.microsoft.icon"},
                               {".svg", "image/svg+xml"},  {"", ""}};
 
-// const char *certificate = NULL; // change this as needed, leave as is for no TLS check (yolo security)
-
 // Our API to handle messages to and from the radio.
 HttpAPI webAPI;
 
-void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
+HTTPServer *insecureServer;
+HTTPSServer *secureServer;
+
+SSLCert *sslCert;
+
+namespace ContentHandler
 {
 
-    // For every resource available on the server, we need to create a ResourceNode
-    // The ResourceNode links URL and HTTP method to a handler function
+void setup()
+{
+    Serial.begin(115200);
 
-    ResourceNode *nodeAPIv1ToRadioOptions = new ResourceNode("/api/v1/toradio", "OPTIONS", &handleAPIv1ToRadio);
-    ResourceNode *nodeAPIv1ToRadio = new ResourceNode("/api/v1/toradio", "PUT", &handleAPIv1ToRadio);
-    ResourceNode *nodeAPIv1FromRadio = new ResourceNode("/api/v1/fromradio", "GET", &handleAPIv1FromRadio);
+    // Initialize SPIFFS
+    if (!SPIFFS.begin(true)) {
+        Serial.println("An error has occurred while mounting SPIFFS");
+        return;
+    }
 
-    //    ResourceNode *nodeHotspotApple = new ResourceNode("/hotspot-detect.html", "GET", &handleHotspot);
-    //    ResourceNode *nodeHotspotAndroid = new ResourceNode("/generate_204", "GET", &handleHotspot);
+    // Read certificate and key files
+    File certFile = SPIFFS.open("/certs/cert.pem", "r");
+    File keyFile = SPIFFS.open("/certs/key.pem", "r");
 
-    ResourceNode *nodeAdmin = new ResourceNode("/admin", "GET", &handleAdmin);
-    //    ResourceNode *nodeAdminSettings = new ResourceNode("/admin/settings", "GET", &handleAdminSettings);
-    //    ResourceNode *nodeAdminSettingsApply = new ResourceNode("/admin/settings/apply", "POST", &handleAdminSettingsApply);
-    //    ResourceNode *nodeAdminFs = new ResourceNode("/admin/fs", "GET", &handleFs);
-    //    ResourceNode *nodeUpdateFs = new ResourceNode("/admin/fs/update", "POST", &handleUpdateFs);
-    //    ResourceNode *nodeDeleteFs = new ResourceNode("/admin/fs/delete", "GET", &handleDeleteFsContent);
+    if (!certFile || !keyFile) {
+        Serial.println("Failed to open certificate or key file");
+        return;
+    }
 
-    ResourceNode *nodeRestart = new ResourceNode("/restart", "POST", &handleRestart);
-    ResourceNode *nodeFormUpload = new ResourceNode("/upload", "POST", &handleFormUpload);
+    size_t certSize = certFile.size();
+    size_t keySize = keyFile.size();
 
-    ResourceNode *nodeJsonScanNetworks = new ResourceNode("/json/scanNetworks", "GET", &handleScanNetworks);
-    ResourceNode *nodeJsonBlinkLED = new ResourceNode("/json/blink", "POST", &handleBlinkLED);
-    ResourceNode *nodeJsonReport = new ResourceNode("/json/report", "GET", &handleReport);
-    ResourceNode *nodeJsonFsBrowseStatic = new ResourceNode("/json/fs/browse/static", "GET", &handleFsBrowseStatic);
-    ResourceNode *nodeJsonDelete = new ResourceNode("/json/fs/delete/static", "DELETE", &handleFsDeleteStatic);
+    unsigned char *certData = (unsigned char *)malloc(certSize);
+    unsigned char *keyData = (unsigned char *)malloc(keySize);
 
-    ResourceNode *nodeRoot = new ResourceNode("/*", "GET", &handleStatic);
+    certFile.read(certData, certSize);
+    keyFile.read(keyData, keySize);
 
-    // Secure nodes
-    secureServer->registerNode(nodeAPIv1ToRadioOptions);
-    secureServer->registerNode(nodeAPIv1ToRadio);
-    secureServer->registerNode(nodeAPIv1FromRadio);
-    //    secureServer->registerNode(nodeHotspotApple);
-    //    secureServer->registerNode(nodeHotspotAndroid);
-    secureServer->registerNode(nodeRestart);
-    secureServer->registerNode(nodeFormUpload);
-    secureServer->registerNode(nodeJsonScanNetworks);
-    secureServer->registerNode(nodeJsonBlinkLED);
-    secureServer->registerNode(nodeJsonFsBrowseStatic);
-    secureServer->registerNode(nodeJsonDelete);
-    secureServer->registerNode(nodeJsonReport);
-    //    secureServer->registerNode(nodeUpdateFs);
-    //    secureServer->registerNode(nodeDeleteFs);
-    secureServer->registerNode(nodeAdmin);
-    //    secureServer->registerNode(nodeAdminFs);
-    //    secureServer->registerNode(nodeAdminSettings);
-    //    secureServer->registerNode(nodeAdminSettingsApply);
-    secureServer->registerNode(nodeRoot); // This has to be last
+    certFile.close();
+    keyFile.close();
 
-    // Insecure nodes
-    insecureServer->registerNode(nodeAPIv1ToRadioOptions);
-    insecureServer->registerNode(nodeAPIv1ToRadio);
-    insecureServer->registerNode(nodeAPIv1FromRadio);
-    //    insecureServer->registerNode(nodeHotspotApple);
-    //    insecureServer->registerNode(nodeHotspotAndroid);
-    insecureServer->registerNode(nodeRestart);
-    insecureServer->registerNode(nodeFormUpload);
-    insecureServer->registerNode(nodeJsonScanNetworks);
-    insecureServer->registerNode(nodeJsonBlinkLED);
-    insecureServer->registerNode(nodeJsonFsBrowseStatic);
-    insecureServer->registerNode(nodeJsonDelete);
-    insecureServer->registerNode(nodeJsonReport);
-    //    insecureServer->registerNode(nodeUpdateFs);
-    //    insecureServer->registerNode(nodeDeleteFs);
-    insecureServer->registerNode(nodeAdmin);
-    //    insecureServer->registerNode(nodeAdminFs);
-    //    insecureServer->registerNode(nodeAdminSettings);
-    //    insecureServer->registerNode(nodeAdminSettingsApply);
-    insecureServer->registerNode(nodeRoot); // This has to be last
+    // Initialize SSL certificate
+    sslCert = new SSLCert(certData, certSize, keyData, keySize);
+
+    // Create the HTTP server instances
+    insecureServer = new HTTPServer();
+    secureServer = new HTTPSServer(sslCert, 443);
+
+    // Register handlers
+    registerHandlers(insecureServer, secureServer);
+
+    // Start the servers
+    insecureServer->start();
+    secureServer->start();
+
+    if (insecureServer->isRunning()) {
+        Serial.println("Insecure HTTP server started");
+    } else {
+        Serial.println("Failed to start insecure HTTP server");
+    }
+
+    if (secureServer->isRunning()) {
+        Serial.println("Secure HTTPS server started");
+    } else {
+        Serial.println("Failed to start secure HTTPS server");
+    }
 }
+
+void loop()
+{
+    // Handle client connections for the servers
+    insecureServer->loop();
+    secureServer->loop();
+    delay(100); // Minimal delay to avoid excessive CPU usage
+}
+
+} // namespace ContentHandler
+
+// // OTA handler functions
+// void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
+// {
+//     if (req->getMethod() == "POST") {
+//         bool updateSuccess = false;
+//         auto contentLength = req->getHeader("Content-Length");
+
+//         if (!contentLength.empty()) {
+//             int len = std::stoi(contentLength);
+
+//             if (!Update.begin(len)) {
+//                 Update.printError(Serial);
+//                 res->setStatusCode(500);
+//                 res->setStatusText("Update failed");
+//                 res->println("Update failed to start");
+//                 return;
+//             }
+
+//             int written = 0;
+//             while (written < len) {
+//                 uint8_t buffer[128];
+//                 int bytesRead = req->readBytes(buffer, sizeof(buffer));
+//                 if (bytesRead > 0) {
+//                     Update.write(buffer, bytesRead);
+//                     written += bytesRead;
+//                 } else {
+//                     break;
+//                 }
+//             }
+
+//             if (Update.end()) {
+//                 if (Update.isFinished()) {
+//                     updateSuccess = true;
+//                 } else {
+//                     Update.printError(Serial);
+//                 }
+//             } else {
+//                 Update.printError(Serial);
+//             }
+//         }
+
+//         if (updateSuccess) {
+//             res->setStatusCode(200);
+//             res->setStatusText("Update Success");
+//             res->println("Update Success! Rebooting...");
+//             delay(1000);
+//             ESP.restart();
+//         } else {
+//             res->setStatusCode(500);
+//             res->setStatusText("Update failed");
+//             res->println("Update failed");
+//         }
+//     } else {
+//         res->setStatusCode(405);
+//         res->setStatusText("Method Not Allowed");
+//         res->println("Only POST method is allowed");
+//     }
+// }
+
+// // Function to serve the OTA upload form
+// void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
+// {
+//     res->setHeader("Content-Type", "text/html");
+//     res->println("<form method='POST' action='/update' enctype='multipart/form-data'>"
+//                  "<input type='file' name='firmware' accept='.bin'>"
+//                  "<input type='submit' value='Update Firmware'>"
+//                  "</form>");
+// }
 
 void handleAPIv1FromRadio(HTTPRequest *req, HTTPResponse *res)
 {
-
     LOG_DEBUG("webAPI handleAPIv1FromRadio\n");
 
     /*
@@ -448,30 +506,18 @@ void handleStatic(HTTPRequest *req, HTTPResponse *res)
 
 void handleFormUpload(HTTPRequest *req, HTTPResponse *res)
 {
-
     LOG_DEBUG("Form Upload - Disabling keep-alive\n");
     res->setHeader("Connection", "close");
 
-    // First, we need to check the encoding of the form that we have received.
-    // The browser will set the Content-Type request header, so we can use it for that purpose.
-    // Then we select the body parser based on the encoding.
-    // Actually we do this only for documentary purposes, we know the form is going
-    // to be multipart/form-data.
     LOG_DEBUG("Form Upload - Creating body parser reference\n");
     HTTPBodyParser *parser;
     std::string contentType = req->getHeader("Content-Type");
 
-    // The content type may have additional properties after a semicolon, for example:
-    // Content-Type: text/html;charset=utf-8
-    // Content-Type: multipart/form-data;boundary=------s0m3w31rdch4r4c73rs
-    // As we're interested only in the actual mime _type_, we strip everything after the
-    // first semicolon, if one exists:
     size_t semicolonPos = contentType.find(";");
     if (semicolonPos != std::string::npos) {
         contentType.resize(semicolonPos);
     }
 
-    // Now, we can decide based on the content type:
     if (contentType == "multipart/form-data") {
         LOG_DEBUG("Form Upload - multipart/form-data\n");
         parser = new HTTPMultipartBodyParser(req);
@@ -483,80 +529,52 @@ void handleFormUpload(HTTPRequest *req, HTTPResponse *res)
     res->println("<html><head><meta http-equiv=\"refresh\" content=\"1;url=/static\" /><title>File "
                  "Upload</title></head><body><h1>File Upload</h1>");
 
-    // We iterate over the fields. Any field with a filename is uploaded.
-    // Note that the BodyParser consumes the request body, meaning that you can iterate over the request's
-    // fields only a single time. The reason for this is that it allows you to handle large requests
-    // which would not fit into memory.
     bool didwrite = false;
 
-    // parser->nextField() will move the parser to the next field in the request body (field meaning a
-    // form field, if you take the HTML perspective). After the last field has been processed, nextField()
-    // returns false and the while loop ends.
     while (parser->nextField()) {
-        // For Multipart data, each field has three properties:
-        // The name ("name" value of the <input> tag)
-        // The filename (If it was a <input type="file">, this is the filename on the machine of the
-        //   user uploading it)
-        // The mime type (It is determined by the client. So do not trust this value and blindly start
-        //   parsing files only if the type matches)
         std::string name = parser->getFieldName();
         std::string filename = parser->getFieldFilename();
         std::string mimeType = parser->getFieldMimeType();
-        // We log all three values, so that you can observe the upload on the serial monitor:
         LOG_DEBUG("handleFormUpload: field name='%s', filename='%s', mimetype='%s'\n", name.c_str(), filename.c_str(),
                   mimeType.c_str());
 
-        // Double check that it is what we expect
         if (name != "file") {
             LOG_DEBUG("Skipping unexpected field\n");
             res->println("<p>No file found.</p>");
             return;
         }
 
-        // Double check that it is what we expect
         if (filename == "") {
             LOG_DEBUG("Skipping unexpected field\n");
             res->println("<p>No file found.</p>");
             return;
         }
 
-        // You should check file name validity and all that, but we skip that to make the core
-        // concepts of the body parser functionality easier to understand.
         std::string pathname = "/static/" + filename;
 
-        // Create a new file to stream the data into
         File file = FSCom.open(pathname.c_str(), FILE_O_WRITE);
         size_t fileLength = 0;
         didwrite = true;
 
-        // With endOfField you can check whether the end of field has been reached or if there's
-        // still data pending. With multipart bodies, you cannot know the field size in advance.
         while (!parser->endOfField()) {
             esp_task_wdt_reset();
 
             byte buf[512];
             size_t readLength = parser->read(buf, 512);
-            // LOG_DEBUG("\n\nreadLength - %i\n", readLength);
 
-            // Abort the transfer if there is less than 50k space left on the filesystem.
             if (FSCom.totalBytes() - FSCom.usedBytes() < 51200) {
                 file.flush();
                 file.close();
                 res->println("<p>Write aborted! Reserving 50k on filesystem.</p>");
 
-                // enableLoopWDT();
-
                 delete parser;
                 return;
             }
 
-            // if (readLength) {
             file.write(buf, readLength);
             fileLength += readLength;
             LOG_DEBUG("File Length %i\n", fileLength);
-            //}
         }
-        // enableLoopWDT();
 
         file.flush();
         file.close();
@@ -672,15 +690,15 @@ void handleReport(HTTPRequest *req, HTTPResponse *res)
 }
 
 /*
-    This supports the Apple Captive Network Assistant (CNA) Portal
+This supports the Apple Captive Network Assistant (CNA) Portal
 */
 void handleHotspot(HTTPRequest *req, HTTPResponse *res)
 {
     LOG_INFO("Hotspot Request\n");
 
     /*
-        If we don't do a redirect, be sure to return a "Success" message
-        otherwise iOS will have trouble detecting that the connection to the SoftAP worked.
+    If we don't do a redirect, be sure to return a "Success" message
+    otherwise iOS will have trouble detecting that the connection to the SoftAP worked.
     */
 
     // Status code is 200 OK by default.
@@ -716,8 +734,6 @@ void handleAdmin(HTTPRequest *req, HTTPResponse *res)
     res->setHeader("Access-Control-Allow-Methods", "GET");
 
     res->println("<h1>Meshtastic</h1>\n");
-    //    res->println("<a href=/admin/settings>Settings</a><br>\n");
-    //    res->println("<a href=/admin/fs>Manage Web Content</a><br>\n");
     res->println("<a href=/json/report>Device Report</a><br>\n");
 }
 
@@ -822,7 +838,6 @@ void handleScanNetworks(HTTPRequest *req, HTTPResponse *res)
     res->setHeader("Content-Type", "application/json");
     res->setHeader("Access-Control-Allow-Origin", "*");
     res->setHeader("Access-Control-Allow-Methods", "GET");
-    // res->setHeader("Content-Type", "text/html");
 
     int n = WiFi.scanNetworks();
 
@@ -842,8 +857,8 @@ void handleScanNetworks(HTTPRequest *req, HTTPResponse *res)
                 networkObjs.push_back(new JSONValue(thisNetwork));
             }
             // Yield some cpu cycles to IP stack.
-            //   This is important in case the list is large and it takes us time to return
-            //   to the main loop.
+            // This is important in case the list is large and it takes us time to return
+            // to the main loop.
             yield();
         }
     }
@@ -858,4 +873,127 @@ void handleScanNetworks(HTTPRequest *req, HTTPResponse *res)
     res->print(value->Stringify().c_str());
     delete value;
 }
+
+// OTA handler functions
+void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
+{
+    if (req->getMethod() == "POST") {
+        bool updateSuccess = false;
+        auto contentLength = req->getHeader("Content-Length");
+
+        if (!contentLength.empty()) {
+            int len = std::stoi(contentLength);
+
+            if (!Update.begin(len)) {
+                Update.printError(Serial);
+                res->setStatusCode(500);
+                res->setStatusText("Update failed");
+                res->println("Update failed to start");
+                return;
+            }
+
+            int written = 0;
+            while (written < len) {
+                uint8_t buffer[128];
+                int bytesRead = req->readBytes(buffer, sizeof(buffer));
+                if (bytesRead > 0) {
+                    Update.write(buffer, bytesRead);
+                    written += bytesRead;
+                } else {
+                    break;
+                }
+            }
+
+            if (Update.end()) {
+                if (Update.isFinished()) {
+                    updateSuccess = true;
+                } else {
+                    Update.printError(Serial);
+                }
+            } else {
+                Update.printError(Serial);
+            }
+        }
+
+        if (updateSuccess) {
+            res->setStatusCode(200);
+            res->setStatusText("Update Success");
+            res->println("Update Success! Rebooting...");
+            delay(1000);
+            ESP.restart();
+        } else {
+            res->setStatusCode(500);
+            res->setStatusText("Update failed");
+            res->println("Update failed");
+        }
+    } else {
+        res->setStatusCode(405);
+        res->setStatusText("Method Not Allowed");
+        res->println("Only POST method is allowed");
+    }
+}
+
+// Function to serve the OTA upload form
+void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
+{
+    res->setHeader("Content-Type", "text/html");
+    res->println("<form method='POST' action='/update' enctype='multipart/form-data'>"
+                 "<input type='file' name='firmware' accept='.bin'>"
+                 "<input type='submit' value='Update Firmware'>"
+                 "</form>");
+}
+
+// Register handlers
+void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
+{
+    ResourceNode *nodeAPIv1ToRadioOptions = new ResourceNode("/api/v1/toradio", "OPTIONS", &handleAPIv1ToRadio);
+    ResourceNode *nodeAPIv1ToRadio = new ResourceNode("/api/v1/toradio", "PUT", &handleAPIv1ToRadio);
+    ResourceNode *nodeAPIv1FromRadio = new ResourceNode("/api/v1/fromradio", "GET", &handleAPIv1FromRadio);
+    ResourceNode *nodeAdmin = new ResourceNode("/admin", "GET", &handleAdmin);
+    ResourceNode *nodeRestart = new ResourceNode("/restart", "POST", &handleRestart);
+    ResourceNode *nodeFormUpload = new ResourceNode("/upload", "POST", &handleFormUpload);
+    ResourceNode *nodeJsonScanNetworks = new ResourceNode("/json/scanNetworks", "GET", &handleScanNetworks);
+    ResourceNode *nodeJsonBlinkLED = new ResourceNode("/json/blink", "POST", &handleBlinkLED);
+    ResourceNode *nodeJsonReport = new ResourceNode("/json/report", "GET", &handleReport);
+    ResourceNode *nodeJsonFsBrowseStatic = new ResourceNode("/json/fs/browse/static", "GET", &handleFsBrowseStatic);
+    ResourceNode *nodeJsonDelete = new ResourceNode("/json/fs/delete/static", "DELETE", &handleFsDeleteStatic);
+    ResourceNode *nodeRoot = new ResourceNode("/*", "GET", &handleStatic);
+
+    // OTA update nodes
+    ResourceNode *nodeOTAUploadForm = new ResourceNode("/ota", "GET", &handleOTAUploadForm);
+    ResourceNode *nodeOTAUpload = new ResourceNode("/update", "POST", &ota_handleFirmwareUpload);
+
+    // Secure nodes
+    secureServer->registerNode(nodeAPIv1ToRadioOptions);
+    secureServer->registerNode(nodeAPIv1ToRadio);
+    secureServer->registerNode(nodeAPIv1FromRadio);
+    secureServer->registerNode(nodeRestart);
+    secureServer->registerNode(nodeFormUpload);
+    secureServer->registerNode(nodeJsonScanNetworks);
+    secureServer->registerNode(nodeJsonBlinkLED);
+    secureServer->registerNode(nodeJsonFsBrowseStatic);
+    secureServer->registerNode(nodeJsonDelete);
+    secureServer->registerNode(nodeJsonReport);
+    secureServer->registerNode(nodeOTAUploadForm);
+    secureServer->registerNode(nodeOTAUpload);
+    secureServer->registerNode(nodeAdmin);
+    secureServer->registerNode(nodeRoot);
+
+    // Insecure nodes
+    insecureServer->registerNode(nodeAPIv1ToRadioOptions);
+    insecureServer->registerNode(nodeAPIv1ToRadio);
+    insecureServer->registerNode(nodeAPIv1FromRadio);
+    insecureServer->registerNode(nodeRestart);
+    insecureServer->registerNode(nodeFormUpload);
+    insecureServer->registerNode(nodeJsonScanNetworks);
+    insecureServer->registerNode(nodeJsonBlinkLED);
+    insecureServer->registerNode(nodeJsonFsBrowseStatic);
+    insecureServer->registerNode(nodeJsonDelete);
+    insecureServer->registerNode(nodeJsonReport);
+    insecureServer->registerNode(nodeAdmin);
+    insecureServer->registerNode(nodeRoot);
+    insecureServer->registerNode(nodeOTAUploadForm);
+    insecureServer->registerNode(nodeOTAUpload);
+}
+
 #endif
