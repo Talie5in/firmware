@@ -822,26 +822,7 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
             int len = std::stoi(contentLength);
             Serial.printf("Content-Length: %d\n", len);
 
-            // Get the partition information
-            const esp_partition_t *update_partition = nullptr;
-
-            // Uncomment the following lines to force the use of the ota_0 partition
-            /*
-            update_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
-            if (update_partition == NULL) {
-                Serial.println("No OTA_0 partition found.");
-                res->setStatusCode(500);
-                res->setStatusText("Update failed");
-                res->println("No OTA_0 partition found.");
-                return;
-            }
-            */
-
-            // Comment the following line to force the use of the ota_0 partition
-
-            if (!update_partition)
-                update_partition = esp_ota_get_next_update_partition(NULL);
-
+            const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
             const esp_partition_t *running_partition = esp_ota_get_running_partition();
 
             if (update_partition == NULL) {
@@ -852,11 +833,10 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
                 return;
             }
 
-            Serial.printf("Update partition: name %s, type %d, subtype %d, offset 0x%08x, size 0x%08x\n", update_partition->label,
-                          update_partition->type, update_partition->subtype, update_partition->address, update_partition->size);
-            Serial.printf("Running partition: name %s, type %d, subtype %d, offset 0x%08x, size 0x%08x\n",
-                          running_partition->label, running_partition->type, running_partition->subtype,
-                          running_partition->address, running_partition->size);
+            Serial.printf("Update partition: type %d, subtype %d, offset 0x%08x, size 0x%08x\n", update_partition->type,
+                          update_partition->subtype, update_partition->address, update_partition->size);
+            Serial.printf("Running partition: type %d, subtype %d, offset 0x%08x, size 0x%08x\n", running_partition->type,
+                          running_partition->subtype, running_partition->address, running_partition->size);
 
             esp_ota_handle_t update_handle;
             esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle);
@@ -870,7 +850,7 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
 
             int written = 0;
             while (written < len) {
-                uint8_t buffer[512];
+                uint8_t buffer[1024];
                 int bytesRead = req->readBytes(buffer, sizeof(buffer));
                 if (bytesRead > 0) {
                     if ((written + bytesRead) > update_partition->size) {
@@ -894,15 +874,14 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
                     }
                     written += bytesRead;
                     Serial.printf("Written %d bytes so far\n", written);
-
-                    // Add a delay to slow down the write process
-                    delay(10);
+                    delay(10); // Adding delay to slow down the write process
                 } else {
                     break;
                 }
             }
 
             if (esp_ota_end(update_handle) == ESP_OK) {
+                Serial.println("esp_ota_end successful, setting boot partition");
                 err = esp_ota_set_boot_partition(update_partition);
                 if (err == ESP_OK) {
                     Serial.println("Update successfully completed. Rebooting.");

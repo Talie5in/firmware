@@ -133,8 +133,8 @@ void createSSLCert()
         //  jm@casler.org (Oct 2020)
         xTaskCreate(taskCreateCert, /* Task function. */
                     "createCert",   /* String with name of task. */
-                    // 16384,          /* Stack size in bytes. */
-                    8192,  /* Stack size in bytes. */
+                    16384,          /* Stack size in bytes. */
+                    // 8192,  /* Stack size in bytes. */
                     NULL,  /* Parameter passed as input of the task */
                     16,    /* Priority of the task. */
                     NULL); /* Task handle. */
