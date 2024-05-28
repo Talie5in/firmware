@@ -815,7 +815,6 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
 {
     if (req->getMethod() == "POST") {
         auto contentLength = req->getHeader("Content-Length");
-
         Serial.println("Received OTA update request");
 
         if (!contentLength.empty()) {
@@ -826,10 +825,10 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
             const esp_partition_t *running_partition = esp_ota_get_running_partition();
 
             if (update_partition == NULL) {
-                Serial.println("No OTA partition found.");
+                Serial.println("Update partition not found");
                 res->setStatusCode(500);
                 res->setStatusText("Update failed");
-                res->println("No OTA partition found.");
+                res->println("Update partition not found");
                 return;
             }
 
@@ -838,73 +837,81 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
             Serial.printf("Running partition: type %d, subtype %d, offset 0x%08x, size 0x%08x\n", running_partition->type,
                           running_partition->subtype, running_partition->address, running_partition->size);
 
-            esp_ota_handle_t update_handle;
+            if (len > update_partition->size) {
+                Serial.println("Firmware size is too large for the partition");
+                res->setStatusCode(500);
+                res->setStatusText("Update failed");
+                res->println("Firmware size is too large for the partition");
+                return;
+            }
+
+            esp_ota_handle_t update_handle = 0;
             esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle);
             if (err != ESP_OK) {
                 Serial.printf("esp_ota_begin failed (%s)\n", esp_err_to_name(err));
                 res->setStatusCode(500);
                 res->setStatusText("Update failed");
-                res->println("Update failed to start");
+                res->println("OTA begin failed");
                 return;
             }
 
             int written = 0;
             while (written < len) {
-                uint8_t buffer[1024];
+                uint8_t buffer[128];
                 int bytesRead = req->readBytes(buffer, sizeof(buffer));
                 if (bytesRead > 0) {
-                    if ((written + bytesRead) > update_partition->size) {
-                        Serial.printf("Written size exceeds partition size: written=%d, partition size=%d\n", written + bytesRead,
-                                      update_partition->size);
-                        esp_ota_end(update_handle);
-                        res->setStatusCode(500);
-                        res->setStatusText("Update failed");
-                        res->println("Firmware size exceeds partition size");
-                        return;
-                    }
-
                     err = esp_ota_write_with_offset(update_handle, buffer, bytesRead, written);
                     if (err != ESP_OK) {
                         Serial.printf("esp_ota_write_with_offset failed (%s)\n", esp_err_to_name(err));
                         esp_ota_end(update_handle);
                         res->setStatusCode(500);
                         res->setStatusText("Update failed");
-                        res->println("Write failed");
+                        res->println("OTA write failed");
                         return;
                     }
                     written += bytesRead;
                     Serial.printf("Written %d bytes so far\n", written);
-                    delay(10); // Adding delay to slow down the write process
+                } else if (bytesRead == 0) {
+                    break; // End of the stream
                 } else {
-                    break;
+                    Serial.printf("Request read failed with error: %d\n", bytesRead);
+                    esp_ota_end(update_handle);
+                    res->setStatusCode(500);
+                    res->setStatusText("Update failed");
+                    res->println("Request read failed");
+                    return;
                 }
             }
 
-            if (esp_ota_end(update_handle) == ESP_OK) {
-                Serial.println("esp_ota_end successful, setting boot partition");
-                err = esp_ota_set_boot_partition(update_partition);
-                if (err == ESP_OK) {
-                    Serial.println("Update successfully completed. Rebooting.");
-                    res->setStatusCode(200);
-                    res->setStatusText("Update Success");
-                    res->println("Update Success! Rebooting...");
-                    delay(1000);
-                    ESP.restart();
-                } else {
-                    Serial.printf("esp_ota_set_boot_partition failed (%s)\n", esp_err_to_name(err));
-                    res->setStatusCode(500);
-                    res->setStatusText("Update failed");
-                }
-            } else {
+            err = esp_ota_end(update_handle);
+            if (err != ESP_OK) {
                 Serial.printf("esp_ota_end failed (%s)\n", esp_err_to_name(err));
                 res->setStatusCode(500);
                 res->setStatusText("Update failed");
+                res->println("OTA end failed");
+                return;
             }
+
+            err = esp_ota_set_boot_partition(update_partition);
+            if (err != ESP_OK) {
+                Serial.printf("esp_ota_set_boot_partition failed (%s)\n", esp_err_to_name(err));
+                res->setStatusCode(500);
+                res->setStatusText("Update failed");
+                res->println("Set boot partition failed");
+                return;
+            }
+
+            Serial.println("OTA update successful, rebooting...");
+            res->setStatusCode(200);
+            res->setStatusText("Update Success");
+            res->println("Update Success! Rebooting...");
+            delay(1000);
+            ESP.restart();
         } else {
             Serial.println("No Content-Length header received");
             res->setStatusCode(411);
             res->setStatusText("Length Required");
-            res->println("Content-Length header required");
+            res->println("No Content-Length header received");
         }
     } else {
         res->setStatusCode(405);
