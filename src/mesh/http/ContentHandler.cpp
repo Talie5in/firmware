@@ -9,6 +9,11 @@
 #if !MESHTASTIC_EXCLUDE_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
 #endif
+#include "esp_err.h"
+#include "esp_flash_partitions.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 #include "mqtt/JSON.h"
 #include "power.h"
 #include "sleep.h"
@@ -129,75 +134,6 @@ void loop()
 }
 
 } // namespace ContentHandler
-
-// // OTA handler functions
-// void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
-// {
-//     if (req->getMethod() == "POST") {
-//         bool updateSuccess = false;
-//         auto contentLength = req->getHeader("Content-Length");
-
-//         if (!contentLength.empty()) {
-//             int len = std::stoi(contentLength);
-
-//             if (!Update.begin(len)) {
-//                 Update.printError(Serial);
-//                 res->setStatusCode(500);
-//                 res->setStatusText("Update failed");
-//                 res->println("Update failed to start");
-//                 return;
-//             }
-
-//             int written = 0;
-//             while (written < len) {
-//                 uint8_t buffer[128];
-//                 int bytesRead = req->readBytes(buffer, sizeof(buffer));
-//                 if (bytesRead > 0) {
-//                     Update.write(buffer, bytesRead);
-//                     written += bytesRead;
-//                 } else {
-//                     break;
-//                 }
-//             }
-
-//             if (Update.end()) {
-//                 if (Update.isFinished()) {
-//                     updateSuccess = true;
-//                 } else {
-//                     Update.printError(Serial);
-//                 }
-//             } else {
-//                 Update.printError(Serial);
-//             }
-//         }
-
-//         if (updateSuccess) {
-//             res->setStatusCode(200);
-//             res->setStatusText("Update Success");
-//             res->println("Update Success! Rebooting...");
-//             delay(1000);
-//             ESP.restart();
-//         } else {
-//             res->setStatusCode(500);
-//             res->setStatusText("Update failed");
-//             res->println("Update failed");
-//         }
-//     } else {
-//         res->setStatusCode(405);
-//         res->setStatusText("Method Not Allowed");
-//         res->println("Only POST method is allowed");
-//     }
-// }
-
-// // Function to serve the OTA upload form
-// void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
-// {
-//     res->setHeader("Content-Type", "text/html");
-//     res->println("<form method='POST' action='/update' enctype='multipart/form-data'>"
-//                  "<input type='file' name='firmware' accept='.bin'>"
-//                  "<input type='submit' value='Update Firmware'>"
-//                  "</form>");
-// }
 
 void handleAPIv1FromRadio(HTTPRequest *req, HTTPResponse *res)
 {
@@ -878,79 +814,95 @@ void handleScanNetworks(HTTPRequest *req, HTTPResponse *res)
 void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
 {
     if (req->getMethod() == "POST") {
+        auto contentLength = req->getHeader("Content-Length");
+
         Serial.println("Received OTA update request");
 
-        // Get content length
-        auto contentLength = req->getHeader("Content-Length");
-        if (contentLength.empty()) {
-            Serial.println("No Content-Length header received");
-            res->setStatusCode(411); // Length Required
-            res->setStatusText("No Content-Length header received");
-            return;
-        }
+        if (!contentLength.empty()) {
+            int len = std::stoi(contentLength);
+            Serial.printf("Content-Length: %d\n", len);
 
-        int len = std::stoi(contentLength);
-        Serial.printf("Content-Length: %d\n", len);
+            const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+            const esp_partition_t *running_partition = esp_ota_get_running_partition();
 
-        // Check available space
-        size_t freeSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-        Serial.printf("Free sketch space: %d\n", freeSketchSpace);
-
-        if (len > freeSketchSpace) {
-            Serial.println("Firmware size is too large");
-            res->setStatusCode(500);
-            res->setStatusText("Update failed");
-            res->println("Firmware size is too large");
-            return;
-        }
-
-        if (!Update.begin(len, U_FLASH)) {
-            Serial.println("Update.begin() failed");
-            Update.printError(Serial);
-            res->setStatusCode(500);
-            res->setStatusText("Update failed to start");
-            return;
-        }
-
-        int written = 0;
-        while (written < len) {
-            uint8_t buffer[128];
-            int bytesRead = req->readBytes(buffer, sizeof(buffer));
-            if (bytesRead > 0) {
-                if (Update.write(buffer, bytesRead) != bytesRead) {
-                    Serial.println("Update.write() failed");
-                    Update.printError(Serial);
-                    res->setStatusCode(500);
-                    res->setStatusText("Update failed");
-                    res->println("Update failed during write");
-                    Update.abort();
-                    return;
-                }
-                written += bytesRead;
-            } else {
-                break;
-            }
-        }
-
-        if (Update.end()) {
-            if (Update.isFinished()) {
-                Serial.println("Update successfully completed. Rebooting.");
-                res->setStatusCode(200);
-                res->setStatusText("Update Success");
-                res->println("Update Success! Rebooting...");
-                delay(1000);
-                ESP.restart();
-            } else {
-                Serial.println("Update not finished? Something went wrong!");
+            if (update_partition == NULL) {
+                Serial.println("No OTA partition found.");
                 res->setStatusCode(500);
                 res->setStatusText("Update failed");
-                Update.printError(Serial);
+                res->println("No OTA partition found.");
+                return;
+            }
+
+            Serial.printf("Update partition: type %d, subtype %d, offset 0x%08x, size 0x%08x\n", update_partition->type,
+                          update_partition->subtype, update_partition->address, update_partition->size);
+            Serial.printf("Running partition: type %d, subtype %d, offset 0x%08x, size 0x%08x\n", running_partition->type,
+                          running_partition->subtype, running_partition->address, running_partition->size);
+
+            esp_ota_handle_t update_handle;
+            esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle);
+            if (err != ESP_OK) {
+                Serial.printf("esp_ota_begin failed (%s)\n", esp_err_to_name(err));
+                res->setStatusCode(500);
+                res->setStatusText("Update failed");
+                res->println("Update failed to start");
+                return;
+            }
+
+            int written = 0;
+            while (written < len) {
+                uint8_t buffer[512];
+                int bytesRead = req->readBytes(buffer, sizeof(buffer));
+                if (bytesRead > 0) {
+                    if ((written + bytesRead) > update_partition->size) {
+                        Serial.printf("Written size exceeds partition size: written=%d, partition size=%d\n", written + bytesRead,
+                                      update_partition->size);
+                        esp_ota_end(update_handle);
+                        res->setStatusCode(500);
+                        res->setStatusText("Update failed");
+                        res->println("Firmware size exceeds partition size");
+                        return;
+                    }
+
+                    err = esp_ota_write_with_offset(update_handle, buffer, bytesRead, written);
+                    if (err != ESP_OK) {
+                        Serial.printf("esp_ota_write_with_offset failed (%s)\n", esp_err_to_name(err));
+                        esp_ota_end(update_handle);
+                        res->setStatusCode(500);
+                        res->setStatusText("Update failed");
+                        res->println("Write failed");
+                        return;
+                    }
+                    written += bytesRead;
+                    Serial.printf("Written %d bytes so far\n", written);
+                } else {
+                    break;
+                }
+            }
+
+            if (esp_ota_end(update_handle) == ESP_OK) {
+                err = esp_ota_set_boot_partition(update_partition);
+                if (err == ESP_OK) {
+                    Serial.println("Update successfully completed. Rebooting.");
+                    res->setStatusCode(200);
+                    res->setStatusText("Update Success");
+                    res->println("Update Success! Rebooting...");
+                    delay(1000);
+                    ESP.restart();
+                } else {
+                    Serial.printf("esp_ota_set_boot_partition failed (%s)\n", esp_err_to_name(err));
+                    res->setStatusCode(500);
+                    res->setStatusText("Update failed");
+                }
+            } else {
+                Serial.printf("esp_ota_end failed (%s)\n", esp_err_to_name(err));
+                res->setStatusCode(500);
+                res->setStatusText("Update failed");
             }
         } else {
-            Serial.println("Update.end() failed");
-            res->setStatusCode(500);
-            res->setStatusText("Update failed");
-            Update.printError(Serial);
+            Serial.println("No Content-Length header received");
+            res->setStatusCode(411);
+            res->setStatusText("Length Required");
+            res->println("Content-Length header required");
         }
     } else {
         res->setStatusCode(405);
