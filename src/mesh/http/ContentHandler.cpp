@@ -856,10 +856,30 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
             }
 
             int written = 0;
+            bool header_skipped = false;
             while (written < len) {
                 uint8_t buffer[128];
                 int bytesRead = req->readBytes(buffer, sizeof(buffer));
                 if (bytesRead > 0) {
+                    // Skip multipart headers
+                    if (!header_skipped) {
+                        String headerEnd = "\r\n\r\n";
+                        int headerEndIdx = -1;
+                        for (int i = 0; i < bytesRead - 3; i++) {
+                            if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+                                headerEndIdx = i + 3;
+                                break;
+                            }
+                        }
+                        if (headerEndIdx != -1) {
+                            bytesRead -= (headerEndIdx + 1);
+                            memmove(buffer, buffer + headerEndIdx + 1, bytesRead);
+                            header_skipped = true;
+                        } else {
+                            continue; // continue reading until the header is skipped
+                        }
+                    }
+
                     err = esp_ota_write_with_offset(update_handle, buffer, bytesRead, written);
                     if (err != ESP_OK) {
                         Serial.printf("esp_ota_write_with_offset failed (%s)\n", esp_err_to_name(err));
