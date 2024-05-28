@@ -875,6 +875,16 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
                             bytesRead -= (headerEndIdx + 1);
                             memmove(buffer, buffer + headerEndIdx + 1, bytesRead);
                             header_skipped = true;
+
+                            // Check first byte after header skip
+                            if (buffer[0] != 0xE9) {
+                                Serial.printf("Invalid first byte: 0x%02X\n", buffer[0]);
+                                esp_ota_end(update_handle);
+                                res->setStatusCode(400);
+                                res->setStatusText("Bad Request");
+                                res->println("Invalid firmware binary");
+                                return;
+                            }
                         } else {
                             continue; // continue reading until the header is skipped
                         }
@@ -922,10 +932,14 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
             }
 
             Serial.println("OTA update successful, rebooting...");
+
             res->setStatusCode(200);
             res->setStatusText("Update Success");
             res->println("Update Success! Rebooting...");
-            delay(1000);
+            res->flush(); // Ensure the response is sent to the client
+            delay(5000);
+            res->finalize(); // Force client connection closed
+            delay(5000);     // Allow time for the response to be sent
             ESP.restart();
         } else {
             Serial.println("No Content-Length header received");
