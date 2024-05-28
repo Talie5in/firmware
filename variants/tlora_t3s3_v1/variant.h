@@ -1,3 +1,6 @@
+#define HAS_SCREEN 0
+#define CANNED_MESSAGE_MODULE_ENABLE 0
+
 #define HAS_SDCARD
 #define SDCARD_USE_SPI1
 
