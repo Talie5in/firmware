@@ -29,9 +29,21 @@
 #include "esp_task_wdt.h"
 #endif
 
+/*
+  Including the esp32_https_server library will trigger a compile time error. I've
+  tracked it down to a reoccurrance of this bug:
+    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=57824
+  The work around is described here:
+    https://forums.xilinx.com/t5/Embedded-Development-Tools/Error-with-Standard-Libaries-in-Zynq/td-p/450032
+
+  Long story short is we need "#undef str" before including the esp32_https_server.
+    - Jm Casler (jm@casler.org) Oct 2020
+*/
+
 #undef str
 
 // Includes for the https server
+//   https://github.com/fhessel/esp32_https_server
 #include <HTTPRequest.hpp>
 #include <HTTPResponse.hpp>
 #include <HTTPSServer.hpp>
@@ -49,12 +61,16 @@ HTTPClient httpClient;
 
 #define DEST_FS_USES_LITTLEFS
 
+// We need to specify some content-type mapping, so the resources get delivered with the
+// right content type and are displayed correctly in the browser
 char contentTypes[][2][32] = {{".txt", "text/plain"},     {".html", "text/html"},
                               {".js", "text/javascript"}, {".png", "image/png"},
                               {".jpg", "image/jpg"},      {".gz", "application/gzip"},
                               {".gif", "image/gif"},      {".json", "application/json"},
                               {".css", "text/css"},       {".ico", "image/vnd.microsoft.icon"},
                               {".svg", "image/svg+xml"},  {"", ""}};
+
+// const char *certificate = NULL; // change this as needed, leave as is for no TLS check (yolo security)
 
 // Our API to handle messages to and from the radio.
 HttpAPI webAPI;
@@ -967,6 +983,9 @@ void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
 // Register handlers
 void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
 {
+    // For every resource available on the server, we need to create a ResourceNode
+    // The ResourceNode links URL and HTTP method to a handler function
+
     // OTA update nodes
     ResourceNode *nodeOTAUploadForm = new ResourceNode("/admin/ota", "GET", &handleOTAUploadForm);
     ResourceNode *nodeOTAUpload = new ResourceNode("/admin/update", "POST", &ota_handleFirmwareUpload);
@@ -983,6 +1002,14 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     ResourceNode *nodeJsonFsBrowseStatic = new ResourceNode("/json/fs/browse/static", "GET", &handleFsBrowseStatic);
     ResourceNode *nodeJsonDelete = new ResourceNode("/json/fs/delete/static", "DELETE", &handleFsDeleteStatic);
     ResourceNode *nodeRoot = new ResourceNode("/*", "GET", &handleStatic);
+    // Commented Nodes
+    //    ResourceNode *nodeHotspotApple = new ResourceNode("/hotspot-detect.html", "GET", &handleHotspot);
+    //    ResourceNode *nodeHotspotAndroid = new ResourceNode("/generate_204", "GET", &handleHotspot);
+    //    ResourceNode *nodeAdminSettings = new ResourceNode("/admin/settings", "GET", &handleAdminSettings);
+    //    ResourceNode *nodeAdminSettingsApply = new ResourceNode("/admin/settings/apply", "POST", &handleAdminSettingsApply);
+    //    ResourceNode *nodeAdminFs = new ResourceNode("/admin/fs", "GET", &handleFs);
+    //    ResourceNode *nodeUpdateFs = new ResourceNode("/admin/fs/update", "POST", &handleUpdateFs);
+    //    ResourceNode *nodeDeleteFs = new ResourceNode("/admin/fs/delete", "GET", &handleDeleteFsContent);
 
     // Secure nodes
     secureServer->registerNode(nodeAPIv1ToRadioOptions);
@@ -998,6 +1025,14 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     secureServer->registerNode(nodeOTAUploadForm);
     secureServer->registerNode(nodeOTAUpload);
     secureServer->registerNode(nodeAdmin);
+    //    secureServer->registerNode(nodeHotspotApple);
+    //    secureServer->registerNode(nodeHotspotAndroid);
+    //    secureServer->registerNode(nodeUpdateFs);
+    //    secureServer->registerNode(nodeDeleteFs);
+    //    secureServer->registerNode(nodeAdminFs);
+    //    secureServer->registerNode(nodeAdminSettings);
+    //    secureServer->registerNode(nodeAdminSettingsApply);
+    // This has to be last (nodeRoot)
     secureServer->registerNode(nodeRoot);
 
     // Insecure nodes
@@ -1014,6 +1049,14 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     insecureServer->registerNode(nodeOTAUploadForm);
     insecureServer->registerNode(nodeOTAUpload);
     insecureServer->registerNode(nodeAdmin);
+    //    insecureServer->registerNode(nodeHotspotApple);
+    //    insecureServer->registerNode(nodeHotspotAndroid);
+    //    insecureServer->registerNode(nodeUpdateFs);
+    //    insecureServer->registerNode(nodeDeleteFs);
+    //    insecureServer->registerNode(nodeAdminFs);
+    //    insecureServer->registerNode(nodeAdminSettings);
+    //    insecureServer->registerNode(nodeAdminSettingsApply);
+    // This has to be last (nodeRoot)
     insecureServer->registerNode(nodeRoot);
 }
 
