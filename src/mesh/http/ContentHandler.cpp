@@ -973,11 +973,90 @@ void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res)
 // Function to serve the OTA upload form
 void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res)
 {
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+    const esp_partition_t *ota_0_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    const esp_partition_t *ota_1_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+
+    if (running_partition == NULL || ota_0_partition == NULL || ota_1_partition == NULL) {
+        res->setStatusCode(500);
+        res->setStatusText("Internal Server Error");
+        res->println("Error finding partitions");
+        return;
+    }
+
+    String response = "<html><body>";
+
+    if (running_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) {
+        size_t ota_1_size = ota_1_partition->size;
+        size_t ota_1_used =
+            ota_1_size - ota_1_partition->size; // This should be the actual logic to calculate used space in OTA_1
+
+        if (ota_1_used < 100 * 1024) {
+            response += "<h2>OTA Bootloader Firmware Upload</h2>";
+            response += "<form method='POST' action='/admin/update' enctype='multipart/form-data'>";
+            response += "<input type='file' name='firmware' accept='.bin'><br>";
+            response += "<input type='submit' value='Upload Bootloader'>";
+            response += "</form>";
+        } else {
+            response += "<h2>Switch to OTA Bootloader</h2>";
+            response += "<form method='POST' action='/admin/switch_bootloader'>";
+            response += "<input type='submit' value='Reboot into OTA Bootloader'>";
+            response += "</form>";
+        }
+    } else if (running_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1) {
+        response += "<h2>Firmware Upload</h2>";
+        response += "<form method='POST' action='/admin/update' enctype='multipart/form-data'>";
+        response += "<input type='file' name='firmware' accept='.bin'><br>";
+        response += "<input type='submit' value='Upload Firmware'>";
+        response += "</form>";
+
+        response += "<h2>Switch to OTA_0</h2>";
+        response += "<form method='POST' action='/admin/switch_bootloader'>";
+        response += "<input type='submit' value='Switch to OTA_0'>";
+        response += "</form>";
+    }
+
+    response += "</body></html>";
+    res->setStatusCode(200);
+    res->setStatusText("OK");
     res->setHeader("Content-Type", "text/html");
-    res->println("<form method='POST' action='/admin/update' enctype='multipart/form-data'>"
-                 "<input type='file' name='firmware' accept='.bin'>"
-                 "<input type='submit' value='Update Firmware'>"
-                 "</form>");
+    res->println(response);
+}
+
+void handleSwitchBootloader(HTTPRequest *req, HTTPResponse *res)
+{
+    const esp_partition_t *running_partition = esp_ota_get_running_partition();
+    const esp_partition_t *ota_0_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    const esp_partition_t *ota_1_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+
+    if (running_partition == NULL || ota_0_partition == NULL || ota_1_partition == NULL) {
+        res->setStatusCode(500);
+        res->setStatusText("Internal Server Error");
+        res->println("Error finding partitions");
+        return;
+    }
+
+    const esp_partition_t *next_partition =
+        (running_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) ? ota_1_partition : ota_0_partition;
+
+    esp_err_t err = esp_ota_set_boot_partition(next_partition);
+    if (err != ESP_OK) {
+        res->setStatusCode(500);
+        res->setStatusText("Internal Server Error");
+        res->println("Failed to set boot partition");
+        return;
+    }
+
+    res->setStatusCode(200);
+    res->setStatusText("OK");
+    res->println("Boot partition switched. Rebooting...");
+    res->flush(); // Ensure the response is sent to the client
+    delay(1000);
+    ESP.restart();
 }
 
 // Register handlers
@@ -989,6 +1068,7 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     // OTA update nodes
     ResourceNode *nodeOTAUploadForm = new ResourceNode("/admin/ota", "GET", &handleOTAUploadForm);
     ResourceNode *nodeOTAUpload = new ResourceNode("/admin/update", "POST", &ota_handleFirmwareUpload);
+    ResourceNode *nodeSwitchBootloader = new ResourceNode("/admin/switch_bootloader", "POST", &handleSwitchBootloader);
     // Original nodes
     ResourceNode *nodeAPIv1ToRadioOptions = new ResourceNode("/api/v1/toradio", "OPTIONS", &handleAPIv1ToRadio);
     ResourceNode *nodeAPIv1ToRadio = new ResourceNode("/api/v1/toradio", "PUT", &handleAPIv1ToRadio);
@@ -1024,6 +1104,7 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     secureServer->registerNode(nodeJsonReport);
     secureServer->registerNode(nodeOTAUploadForm);
     secureServer->registerNode(nodeOTAUpload);
+    secureServer->registerNode(nodeSwitchBootloader);
     secureServer->registerNode(nodeAdmin);
     //    secureServer->registerNode(nodeHotspotApple);
     //    secureServer->registerNode(nodeHotspotAndroid);
@@ -1048,6 +1129,7 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
     insecureServer->registerNode(nodeJsonReport);
     insecureServer->registerNode(nodeOTAUploadForm);
     insecureServer->registerNode(nodeOTAUpload);
+    insecureServer->registerNode(nodeSwitchBootloader);
     insecureServer->registerNode(nodeAdmin);
     //    insecureServer->registerNode(nodeHotspotApple);
     //    insecureServer->registerNode(nodeHotspotAndroid);

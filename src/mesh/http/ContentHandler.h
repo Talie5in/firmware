@@ -9,6 +9,7 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer);
 // OTA handler functions
 void handleOTAUploadForm(HTTPRequest *req, HTTPResponse *res);
 void ota_handleFirmwareUpload(HTTPRequest *req, HTTPResponse *res);
+void handleSwitchBootloader(HTTPRequest *req, HTTPResponse *res);
 // Declare some handler functions for the various URLs on the server
 void handleAPIv1FromRadio(HTTPRequest *req, HTTPResponse *res);
 void handleAPIv1ToRadio(HTTPRequest *req, HTTPResponse *res);
